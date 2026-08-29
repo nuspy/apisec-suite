@@ -77,6 +77,13 @@ class ApiSecSuiteApp(APISCANApp):
         self._suite_init_vars()
         self._runner: ScanRunner | None = None
         self._outcome = None
+        # Azioni sulla UI richieste dai thread di lavoro. NON si usa
+        # `root.after()` dal thread: registra un comando nell'interprete Tcl da
+        # fuori dal suo loop, e quando il loop non e' ancora partito solleva
+        # "main thread is not in main loop". La queue e' lo stesso meccanismo
+        # che la GUI di APISCAN gia' usa per l'output, drenata dal thread
+        # principale.
+        self._ui_queue: queue.Queue = queue.Queue()
         super().__init__(root)
         root.title(APP_TITLE)
         self._log("", "white")
@@ -313,20 +320,34 @@ class ApiSecSuiteApp(APISCANApp):
         self._log("  Ricerca del documento OpenAPI", "header")
         self._log("=" * 62, "header")
 
+        # Tutto quello che serve al thread si legge QUI, nel thread principale.
+        # Tkinter non e' thread-safe: interrogare le sue variabili da un thread
+        # secondario e' una corsa che a volte funziona e a volte fa cadere
+        # l'interprete Tcl, con un errore che non punta a questa riga.
+        params = {
+            "url": url,
+            "headers": self._auth_headers(),
+            "timeout": _as_float(self.timeout_var.get(), 8.0) or 8.0,
+            "insecure": bool(self.insecure_var.get()),
+            "proxy": self.proxy_var.get().strip(),
+            "out_dir": Path(self.suite_output_var.get().strip()
+                            or "apisec_out") / "discovery",
+        }
+
         def work() -> None:
             from ..discovery import discover, save_spec
             try:
                 result = discover(
-                    url,
-                    headers=self._suite_config().auth.as_headers(),
-                    timeout=_as_float(self.timeout_var.get(), 8.0) or 8.0,
-                    insecure=self.insecure_var.get(),
-                    proxy=self.proxy_var.get().strip(),
+                    params["url"],
+                    headers=params["headers"],
+                    timeout=params["timeout"],
+                    insecure=params["insecure"],
+                    proxy=params["proxy"],
                     progress=lambda line: self.text_queue.put(line),
                 )
             except Exception as exc:
                 self.text_queue.put(f"[!] Ricerca fallita: {exc}")
-                self.root.after(0, lambda: self._discover_done(None, None))
+                self._ui_queue.put(lambda: self._discover_done(None, None))
                 return
 
             for line in result.summary_lines():
@@ -334,15 +355,28 @@ class ApiSecSuiteApp(APISCANApp):
 
             saved = None
             if result.best is not None:
-                target_dir = Path(self.suite_output_var.get().strip()
-                                  or "apisec_out") / "discovery"
                 try:
-                    saved = save_spec(result, target_dir)
+                    saved = save_spec(result, params["out_dir"])
                 except OSError as exc:
                     self.text_queue.put(f"[!] Salvataggio fallito: {exc}")
-            self.root.after(0, lambda: self._discover_done(result, saved))
+            self._ui_queue.put(lambda: self._discover_done(result, saved))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Header di autenticazione dai widget, senza costruire l'intera config.
+
+        `_suite_config()` legge decine di variabili e invoca `_build_args()`:
+        troppo lavoro quando servono solo un token e una chiave API.
+        """
+        headers: dict[str, str] = {}
+        token = self.token_var.get().strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        api_key = self.apikey_var.get().strip()
+        if api_key:
+            headers[self.apikey_header_var.get().strip() or "X-API-Key"] = api_key
+        return headers
 
     def _discover_done(self, result: object | None, saved: Path | None) -> None:
         self.discover_btn.configure(state=NORMAL)
@@ -545,15 +579,19 @@ class ApiSecSuiteApp(APISCANApp):
 
     def _test_llm(self) -> None:
         self.llm_status_var.set("verifica in corso...")
+        # Le impostazioni si leggono nel thread principale, per lo stesso
+        # motivo per cui lo fa `_discover_now`: le variabili Tk non si toccano
+        # da altri thread.
+        settings = self._llm_settings()
 
         def work() -> None:
             from ..llm import LLMClient
             try:
-                ok, message = LLMClient(self._llm_settings()).test()
+                ok, message = LLMClient(settings).test()
             except Exception as exc:
                 ok, message = False, str(exc)
-            self.root.after(0, lambda: self.llm_status_var.set(
-                ("OK — " if ok else "errore — ") + message[:160]))
+            text = ("OK — " if ok else "errore — ") + message[:160]
+            self._ui_queue.put(lambda: self.llm_status_var.set(text))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -828,6 +866,27 @@ class ApiSecSuiteApp(APISCANApp):
                 import traceback
                 for line in traceback.format_exc().splitlines():
                     self.text_queue.put(line)
+
+    def _poll_queue(self) -> None:
+        """Drena le azioni richieste dai thread, poi delega alla classe base.
+
+        La base si ri-schedula da sola con `after(100, self._poll_queue)`, e
+        per via del dispatch dinamico rischedula *questo* metodo: basta
+        agganciarsi qui perche' le azioni vengano eseguite di continuo, sempre
+        nel thread principale.
+        """
+        while True:
+            try:
+                action = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                action()
+            except Exception as exc:
+                # Un callback difettoso non deve fermare il polling: senza
+                # questo, la GUI smetterebbe di aggiornarsi del tutto.
+                self._log(f"[!] Aggiornamento interfaccia fallito: {exc}", "red")
+        super()._poll_queue()
 
     def _stop_scan(self) -> None:
         if self._runner is not None:
