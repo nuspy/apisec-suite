@@ -1,0 +1,20 @@
+# apisec-suite — dipendenze della suite.
+#
+# Gli engine hanno le proprie: APISCAN porta con se'
+# vendor/apiscanner/requirements.txt (installalo se usi quell'engine), VulnAPI
+# e' un binario Go e non ne ha.
+
+# Chiamate HTTP: usata dal client LLM e dalla lettura dei report remoti.
+requests>=2.31.0
+
+# OpenAPI in formato YAML. Senza, restano leggibili solo i .json.
+PyYAML>=6.0
+
+# --- opzionali ---
+# Tkinter serve alla GUI ma non si installa da pip: e' nella standard library
+# su Windows e macOS, mentre su Debian/Ubuntu va installato a parte
+# (`apt install python3-tk`).
+#
+# llmswitch abilita l'analisi LLM. Non e' su PyPI: installalo in editable dal
+# suo checkout, oppure indica la sua cartella con la variabile LLMSWITCH_HOME.
+#   pip install -e /percorso/di/llmswitch

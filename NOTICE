@@ -1,0 +1,73 @@
+apisec-suite
+============
+
+Questo progetto orchestra strumenti di terze parti che NON sono suoi e che non
+vengono ridistribuiti qui: `bootstrap.py` li scarica dalle fonti ufficiali.
+Ognuno resta soggetto alla propria licenza.
+
+
+APISCAN
+-------
+    Autore      Perry Mertens <pamsniffer@gmail.com>
+    Licenza     GNU Affero General Public License v3.0
+    Fonte       https://github.com/perrym/apiscanner
+    Uso         Eseguito come processo separato. La GUI della suite estende
+                per sottoclasse `apiscan_gui.APISCANApp`.
+
+    *** La GUI della suite e' un'opera derivata di APISCAN e quindi tutto
+    questo progetto e' distribuito sotto AGPL-3.0. Vedi il file LICENSE. ***
+
+    Conseguenza concreta: chi offre questa suite come servizio accessibile in
+    rete deve rendere disponibile il sorgente completo, comprese le proprie
+    modifiche, sotto la stessa licenza.
+
+
+VulnAPI
+-------
+    Autore      Cerberauth
+    Licenza     MIT
+    Fonte       https://github.com/cerberauth/vulnapi
+    Uso         Eseguito come binario esterno. Nessun collegamento di codice:
+                la suite lo lancia e ne legge il report JSON.
+
+    Restando un processo separato, VulnAPI non diventa un'opera derivata di
+    questa suite e la sua licenza MIT resta intatta. E' il motivo per cui gli
+    engine sono orchestrati per processo e non importati.
+
+
+42Crunch (freemium)
+-------------------
+    Autore      42Crunch Ltd
+    Licenza     Proprietaria, servizio freemium
+    Fonte       https://github.com/42Crunch/api-security-scan-action-freemium
+                https://github.com/42Crunch/api-security-audit-action-freemium
+    Uso         NON eseguito da questa suite. Il tab CI/CD genera un workflow
+                GitHub Actions che lo invoca nella pipeline dell'utente.
+
+    Limiti del piano freemium, dalla documentazione ufficiale: 25 scansioni per
+    repository al mese, massimo tre repository per organizzazione, solo i
+    security quality gate predefiniti e solo il dizionario dati standard.
+
+    Vincolo d'uso dichiarato dal fornitore: "You may only use 42Crunch Scan
+    against APIs that you own, but not those of third parties."
+
+
+llmswitch
+---------
+    Licenza     vedi il progetto
+    Fonte       https://github.com/nuspy/llmswitch
+    Uso         Dipendenza opzionale, importata come libreria. In sua assenza
+                la suite funziona senza le funzioni LLM.
+
+
+AVVERTENZA D'USO
+----------------
+Gli engine orchestrati da questa suite eseguono test attivi: inviano payload di
+attacco, tentano bypass di autenticazione e provano accessi non autorizzati.
+
+Vanno puntati solo su API di cui si e' proprietari o per cui si dispone di
+un'autorizzazione scritta.
+
+Non vanno usati su sistemi in produzione: un'implementazione poco resiliente
+puo' andare in crash o comportarsi in modo imprevisto sotto i test, come
+avverte 42Crunch nella propria documentazione.

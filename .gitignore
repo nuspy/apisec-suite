@@ -1,0 +1,36 @@
+# Engine scaricati da bootstrap.py: non si ridistribuiscono da qui.
+/bin/
+/vendor/
+
+# Risultati delle scansioni. Contengono richieste e risposte reali del
+# bersaglio, quindi anche token e dati: non devono finire in un repository.
+/apisec_out/
+/apisec_out_*/
+/apisec_auth/
+*.sarif
+findings.json
+results.db
+
+# Artefatti di APISCAN, che li scrive nella cartella di lavoro.
+audit_*/
+apiscan-plan.csv
+api_*_report.html
+combined_report.html
+review.html
+
+# OpenAPI generato dal target di test.
+/tests/openapi.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+.vs/
+*.swp
