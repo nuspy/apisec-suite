@@ -180,6 +180,8 @@ def _discovery_section(discovery: Any) -> str:
     requests_made = getattr(discovery, "requests_made", 0)
     server = " ".join(x for x in (getattr(discovery, "server", ""),
                                   getattr(discovery, "powered_by", "")) if x)
+    emap = getattr(discovery, "endpoint_map", None)
+    synthesized = getattr(discovery, "synthesized_to", None)
 
     rows = []
     for spec in specs[:10]:
@@ -217,14 +219,52 @@ def _discovery_section(discovery: Any) -> str:
             f"<code>{html.escape(u)}</code>" for u in well_known[:5]) + "</li>")
     extra.append(f"<li>Richieste di sola lettura effettuate: {requests_made}</li>")
 
+    # Superficie ricostruita da JS/robots/sitemap/OSINT.
+    surface = ""
+    if emap is not None and getattr(emap, "endpoints", None):
+        endpoints = emap.endpoints
+        by_source = getattr(emap, "per_source", {}) or {}
+        src_line = ", ".join(f"{html.escape(s)}: {n}"
+                             for s, n in sorted(by_source.items()))
+        rows = []
+        for path in sorted(endpoints)[:60]:
+            ep = endpoints[path]
+            methods = ", ".join(sorted(ep.methods)) or "—"
+            srcs = ", ".join(sorted(ep.sources))
+            rows.append(
+                f"<tr><th scope='row'><code>{html.escape(path)}</code></th>"
+                f"<td data-l='Metodi'>{html.escape(methods)}</td>"
+                f"<td data-l='Fonte'>{html.escape(srcs)}</td></tr>")
+        more = (f"<p class='muted small'>… e altri "
+                f"{len(endpoints) - 60}</p>" if len(endpoints) > 60 else "")
+        synth_note = ""
+        if synthesized is not None:
+            synth_note = (
+                "<p class='warn'>Non essendoci un documento ufficiale, da questi "
+                "endpoint e' stato sintetizzato un OpenAPI usato per la "
+                "scansione. E' una mappa dei path, non un contratto: mancano "
+                "tipi, schemi e risposte.</p>")
+        surface = f"""
+  <h3>Superficie ricostruita ({len(endpoints)} endpoint)</h3>
+  <p class="muted small">Da fonti diverse dal documento — {src_line}. Sono i
+  path che l'API espone secondo il suo stesso codice client, robots.txt e gli
+  archivi: spesso piu' ampi di quanto un documento dichiari.</p>
+  {synth_note}
+  <div class="tablewrap"><table>
+    <thead><tr><th scope="col">Endpoint</th><th scope="col">Metodi</th>
+    <th scope="col">Fonte</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table></div>{more}"""
+
     return f"""
 <section aria-labelledby="h-disc">
   <h2 id="h-disc">Scoperta del contratto</h2>
   <p class="muted">Il documento non e' stato fornito ma cercato sul bersaglio.
-  La copertura della scansione e' quella dichiarata dal documento trovato, che
-  puo' essere piu' stretta della superficie reale dell'API.</p>
+  La copertura della scansione e' quella del documento usato, che puo' essere
+  piu' stretta della superficie reale dell'API.</p>
   {table}
   <ul class="small muted">{''.join(extra)}</ul>
+  {surface}
 </section>"""
 
 

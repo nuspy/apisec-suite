@@ -60,10 +60,24 @@ def build_parser() -> argparse.ArgumentParser:
     disc.add_argument("--discover-path", action="append", default=[],
                       metavar="PERCORSO",
                       help="percorso aggiuntivo da sondare, ripetibile")
+    disc.add_argument("--no-js", dest="analyze_js", action="store_false",
+                      default=True,
+                      help="non analizzare i bundle JavaScript per gli endpoint")
+    disc.add_argument("--no-robots", dest="read_robots", action="store_false",
+                      default=True,
+                      help="non leggere robots.txt ne' sitemap.xml")
+    disc.add_argument("--osint", action="store_true",
+                      help="OSINT passivo: archivi pubblici (Wayback, Common "
+                           "Crawl). ATTENZIONE: invia il dominio del bersaglio a "
+                           "servizi terzi, che lo registrano")
+    disc.add_argument("--no-synthesize", dest="synthesize_fallback",
+                      action="store_false", default=True,
+                      help="se non trova un documento, non sintetizzarne uno "
+                           "dagli endpoint ricostruiti")
     disc.add_argument("--no-crawl-fallback", dest="crawl_fallback",
                       action="store_false", default=True,
-                      help="se non trova il documento, non lasciare che APISCAN "
-                           "ne costruisca uno crawlando")
+                      help="ultimo ripiego: non lasciare che APISCAN costruisca "
+                           "un contratto crawlando")
     disc.add_argument("--save-spec", default="",
                       help="salva anche qui il documento trovato")
 
@@ -226,6 +240,10 @@ def config_from_args(args: argparse.Namespace) -> ScanConfig:
         # sarebbe l'unica lettura possibile, ma inutile.
         auto_discover=args.discover or args.discover_only,
         discover_extra_paths=args.discover_path,
+        discover_analyze_js=args.analyze_js,
+        discover_read_robots=args.read_robots,
+        discover_osint=args.osint,
+        synthesize_fallback=args.synthesize_fallback,
         crawl_fallback=args.crawl_fallback,
         apiscan_checks=split_list(args.checks),
         vulnapi_mode=args.vulnapi_mode,
@@ -281,6 +299,8 @@ def run_discovery_only(cfg: ScanConfig, args: argparse.Namespace) -> int:
     """
     from apisec.discovery import discover, save_spec
 
+    from apisec.discovery import synthesize_spec
+
     result = discover(
         cfg.target_url,
         headers=cfg.auth.as_headers(),
@@ -289,6 +309,9 @@ def run_discovery_only(cfg: ScanConfig, args: argparse.Namespace) -> int:
         insecure=cfg.insecure,
         proxy=cfg.proxy,
         extra_paths=cfg.discover_extra_paths,
+        analyze_js=cfg.discover_analyze_js,
+        read_robots=cfg.discover_read_robots,
+        osint=cfg.discover_osint,
         progress=lambda line: print(line, flush=True),
     )
 
@@ -298,29 +321,54 @@ def run_discovery_only(cfg: ScanConfig, args: argparse.Namespace) -> int:
         print(line)
     print("=" * 62)
 
+    # Gli endpoint ricostruiti sono un risultato a se': anche senza un
+    # documento vero, sono la superficie da cui partire.
+    emap = result.endpoint_map
+    if emap is not None and emap.endpoints:
+        print(f"\nSuperficie ricostruita ({len(emap.endpoints)} endpoint):")
+        for path in emap.paths()[:40]:
+            endpoint = emap.endpoints[path]
+            methods = ",".join(sorted(endpoint.methods)) or "?"
+            print(f"  {methods:12} {path}  "
+                  f"[{', '.join(sorted(endpoint.sources))}]")
+        if len(emap.endpoints) > 40:
+            print(f"  ... e altri {len(emap.endpoints) - 40}")
+
     if result.errors:
-        print(f"Errori di rete (primi {len(result.errors)}): "
+        print(f"\nErrori di rete (primi {len(result.errors)}): "
               f"{'; '.join(result.errors)}", file=sys.stderr)
 
-    best = result.best
-    if best is None:
-        print("\nNessun documento utilizzabile. Opzioni:", file=sys.stderr)
-        print("  - indicare percorsi aggiuntivi con --discover-path", file=sys.stderr)
-        print("  - lasciare che APISCAN ne costruisca uno: --crawl", file=sys.stderr)
-        return EXIT_NO_ENGINE
-
     destination = Path(args.save_spec) if args.save_spec else cfg.run_dir()
-    if destination.suffix:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(best._body, encoding="utf-8")
-        saved = destination
-    else:
-        saved = save_spec(result, destination)
+    best = result.best
 
-    print(f"\nDocumento salvato in: {saved}")
-    print(f"Per scansionarlo:\n"
-          f"  --url {cfg.target_url} --openapi {saved}")
-    return EXIT_OK
+    if best is not None:
+        if destination.suffix:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(best._body, encoding="utf-8")
+            saved = destination
+        else:
+            saved = save_spec(result, destination)
+        print(f"\nDocumento trovato e salvato in: {saved}")
+        print(f"Per scansionarlo:\n  --url {cfg.target_url} --openapi {saved}")
+        return EXIT_OK
+
+    # Nessun documento vero: si offre la sintesi dagli endpoint.
+    synth = synthesize_spec(
+        result, cfg.target_url,
+        destination.parent if destination.suffix else destination)
+    if synth is not None:
+        print(f"\nNessun documento ufficiale, ma ho sintetizzato un OpenAPI da "
+              f"{len(emap.endpoints)} endpoint: {synth}")
+        print("E' una mappa, non un contratto: mancano tipi e schemi.")
+        print(f"Per scansionarlo:\n  --url {cfg.target_url} --openapi {synth}")
+        return EXIT_OK
+
+    print("\nNessun documento e nessun endpoint ricostruibile. Opzioni:",
+          file=sys.stderr)
+    print("  - percorsi aggiuntivi con --discover-path", file=sys.stderr)
+    print("  - archivi pubblici con --osint", file=sys.stderr)
+    print("  - far crawlare APISCAN: --crawl", file=sys.stderr)
+    return EXIT_NO_ENGINE
 
 
 def main(argv: list[str] | None = None) -> int:

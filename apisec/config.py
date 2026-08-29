@@ -129,9 +129,19 @@ class ScanConfig:
     auto_discover: bool = False
     #: Percorsi aggiuntivi da sondare, oltre a quelli convenzionali.
     discover_extra_paths: list[str] = field(default_factory=list)
-    #: Se la ricerca non trova nulla, lascia che APISCAN costruisca un
-    #: contratto crawlando gli endpoint. E' piu' lento e meno accurato di un
-    #: documento vero, ma e' meglio di non scansionare affatto.
+    #: Analizza i bundle JavaScript per estrarre i path delle API.
+    discover_analyze_js: bool = True
+    #: Legge robots.txt e sitemap.xml per i path dichiarati.
+    discover_read_robots: bool = True
+    #: OSINT passivo: archivi pubblici (Wayback, Common Crawl). Contatta servizi
+    #: terzi a cui invia il dominio del bersaglio, quindi e' disattivato di
+    #: default e va scelto consapevolmente.
+    discover_osint: bool = False
+    #: Se non trova un documento vero ma ha ricostruito degli endpoint,
+    #: sintetizza un OpenAPI da quelli e lo usa per la scansione.
+    synthesize_fallback: bool = True
+    #: Ultimo ripiego: lascia che APISCAN costruisca un contratto crawlando. Piu'
+    #: lento e meno accurato di un documento vero, ma meglio di non scansionare.
     crawl_fallback: bool = True
 
     # --- comuni a piu' engine ---

@@ -110,6 +110,10 @@ class ApiSecSuiteApp(APISCANApp):
 
         # --- scoperta del contratto ---
         self.discover_var = BooleanVar(value=True)
+        self.discover_js_var = BooleanVar(value=True)
+        self.discover_robots_var = BooleanVar(value=True)
+        self.discover_osint_var = BooleanVar(value=False)
+        self.synthesize_fallback_var = BooleanVar(value=True)
         self.crawl_fallback_var = BooleanVar(value=True)
         self.discover_status_var = StringVar(value="non eseguita")
 
@@ -272,15 +276,48 @@ class ApiSecSuiteApp(APISCANApp):
             disc, text="Cerca il documento se il campo Swagger e' vuoto",
             variable=self.discover_var, style="Card.TCheckbutton").grid(
             row=1, column=0, columnspan=3, sticky=W, padx=14, pady=2)
+
+        # Le fonti, ognuna attivabile. Le prime tre contattano solo il
+        # bersaglio; l'OSINT contatta terzi ed e' spento di default.
+        ttk.Label(disc, text="Fonti:", style="Muted.TLabel").grid(
+            row=2, column=0, sticky=W, padx=(28, 8), pady=(6, 0))
+        ttk.Checkbutton(
+            disc, text="Analisi dei bundle JavaScript (endpoint chiamati dalla "
+                       "SPA)", variable=self.discover_js_var,
+            style="Card.TCheckbutton").grid(row=3, column=0, columnspan=3,
+                                            sticky=W, padx=(34, 14), pady=1)
+        ttk.Checkbutton(
+            disc, text="robots.txt e sitemap.xml",
+            variable=self.discover_robots_var,
+            style="Card.TCheckbutton").grid(row=4, column=0, columnspan=3,
+                                            sticky=W, padx=(34, 14), pady=1)
         ttk.Checkbutton(
             disc,
-            text="Se non lo trova, lascia che APISCAN ne costruisca uno "
-                 "crawlando gli endpoint",
-            variable=self.crawl_fallback_var, style="Card.TCheckbutton").grid(
-            row=2, column=0, columnspan=3, sticky=W, padx=14, pady=2)
+            text="OSINT passivo: Wayback, Common Crawl — invia il dominio a "
+                 "servizi terzi",
+            variable=self.discover_osint_var,
+            style="Card.TCheckbutton").grid(row=5, column=0, columnspan=3,
+                                            sticky=W, padx=(34, 14), pady=1)
+
+        ttk.Label(disc, text="Se non trova un documento:",
+                  style="Muted.TLabel").grid(
+            row=6, column=0, columnspan=3, sticky=W, padx=(28, 8), pady=(8, 0))
+        ttk.Checkbutton(
+            disc,
+            text="Sintetizza un OpenAPI dagli endpoint ricostruiti "
+                 "(consigliato)",
+            variable=self.synthesize_fallback_var,
+            style="Card.TCheckbutton").grid(row=7, column=0, columnspan=3,
+                                            sticky=W, padx=(34, 14), pady=1)
+        ttk.Checkbutton(
+            disc,
+            text="Come ultimo ripiego, lascia che APISCAN crawli gli endpoint",
+            variable=self.crawl_fallback_var,
+            style="Card.TCheckbutton").grid(row=8, column=0, columnspan=3,
+                                            sticky=W, padx=(34, 14), pady=1)
 
         actions = ttk.Frame(disc, style="Card.TFrame")
-        actions.grid(row=3, column=0, columnspan=3, sticky="ew", padx=14,
+        actions.grid(row=9, column=0, columnspan=3, sticky="ew", padx=14,
                      pady=(10, 8))
         self.discover_btn = ttk.Button(
             actions, text="Cerca ora", style="Small.TButton",
@@ -292,10 +329,11 @@ class ApiSecSuiteApp(APISCANApp):
         ttk.Label(
             disc,
             text="«Cerca ora» fa solo richieste di lettura: nessun payload di "
-                 "attacco. Il documento trovato viene salvato e scritto nel "
-                 "campo Swagger del tab Target.",
+                 "attacco. Il documento trovato — o quello sintetizzato dagli "
+                 "endpoint — viene salvato e scritto nel campo Swagger del tab "
+                 "Target.",
             style="Muted.TLabel", wraplength=780, justify="left").grid(
-            row=4, column=0, columnspan=3, sticky=W, padx=14, pady=(0, 8))
+            row=10, column=0, columnspan=3, sticky=W, padx=14, pady=(0, 8))
 
         note = ttk.Label(
             parent,
@@ -324,18 +362,33 @@ class ApiSecSuiteApp(APISCANApp):
         # Tkinter non e' thread-safe: interrogare le sue variabili da un thread
         # secondario e' una corsa che a volte funziona e a volte fa cadere
         # l'interprete Tcl, con un errore che non punta a questa riga.
+        if self.discover_osint_var.get():
+            if not messagebox.askyesno(
+                "OSINT passivo",
+                "L'OSINT interroga archivi pubblici (Wayback, Common Crawl) e "
+                "invia il dominio del bersaglio a quei servizi, che lo "
+                "registrano.\n\nProcedere?",
+            ):
+                self.discover_btn.configure(state=NORMAL)
+                self.discover_status_var.set("annullata")
+                return
+
         params = {
             "url": url,
             "headers": self._auth_headers(),
             "timeout": _as_float(self.timeout_var.get(), 8.0) or 8.0,
             "insecure": bool(self.insecure_var.get()),
             "proxy": self.proxy_var.get().strip(),
+            "analyze_js": bool(self.discover_js_var.get()),
+            "read_robots": bool(self.discover_robots_var.get()),
+            "osint": bool(self.discover_osint_var.get()),
+            "synthesize": bool(self.synthesize_fallback_var.get()),
             "out_dir": Path(self.suite_output_var.get().strip()
                             or "apisec_out") / "discovery",
         }
 
         def work() -> None:
-            from ..discovery import discover, save_spec
+            from ..discovery import discover, save_spec, synthesize_spec
             try:
                 result = discover(
                     params["url"],
@@ -343,6 +396,9 @@ class ApiSecSuiteApp(APISCANApp):
                     timeout=params["timeout"],
                     insecure=params["insecure"],
                     proxy=params["proxy"],
+                    analyze_js=params["analyze_js"],
+                    read_robots=params["read_robots"],
+                    osint=params["osint"],
                     progress=lambda line: self.text_queue.put(line),
                 )
             except Exception as exc:
@@ -354,11 +410,15 @@ class ApiSecSuiteApp(APISCANApp):
                 self.text_queue.put(f"    {line}")
 
             saved = None
-            if result.best is not None:
-                try:
+            try:
+                if result.best is not None:
                     saved = save_spec(result, params["out_dir"])
-                except OSError as exc:
-                    self.text_queue.put(f"[!] Salvataggio fallito: {exc}")
+                elif params["synthesize"]:
+                    # Nessun documento vero: si sintetizza dagli endpoint.
+                    saved = synthesize_spec(result, params["url"],
+                                            params["out_dir"])
+            except OSError as exc:
+                self.text_queue.put(f"[!] Salvataggio fallito: {exc}")
             self._ui_queue.put(lambda: self._discover_done(result, saved))
 
         threading.Thread(target=work, daemon=True).start()
@@ -386,21 +446,35 @@ class ApiSecSuiteApp(APISCANApp):
             return
 
         best = getattr(result, "best", None)
-        if best is None:
-            self.discover_status_var.set("nessun documento trovato")
+        emap = getattr(result, "endpoint_map", None)
+        n_endpoints = len(emap.endpoints) if emap is not None else 0
+
+        if best is not None:
+            self.discover_status_var.set(
+                f"documento: {best.operations} operazioni ({best.confidence:.0%})")
+        elif saved is not None:
+            # Nessun documento vero, ma un OpenAPI sintetizzato dagli endpoint.
+            self.discover_status_var.set(
+                f"sintetizzato da {n_endpoints} endpoint")
+        else:
+            extra = (f" — ricostruiti {n_endpoints} endpoint, attiva la sintesi"
+                     if n_endpoints else "")
+            self.discover_status_var.set("nessun documento trovato" + extra)
             self._log("[!] Nessun documento trovato. Alla scansione, APISCAN "
                       "puo' costruirne uno crawlando (opzione qui sopra).",
                       "yellow")
             return
 
-        self.discover_status_var.set(
-            f"trovato: {best.operations} operazioni ({best.confidence:.0%})")
         if saved is not None:
             # Compilare il campo del tab Target e' il punto dell'operazione:
             # da qui in poi la scansione parte come se il file fosse stato
             # indicato a mano.
             self.swagger_var.set(str(saved))
-            self._log(f"[+] Documento salvato e impostato: {saved}", "green")
+            kind = "Documento" if best is not None else "OpenAPI sintetizzato"
+            self._log(f"[+] {kind} salvato e impostato: {saved}", "green")
+            if best is None:
+                self._log("[!] E' una mappa degli endpoint, non un contratto: "
+                          "mancano tipi e schemi.", "yellow")
             self._notebook.select(0)
 
     def _browse_output(self) -> None:
@@ -770,6 +844,10 @@ class ApiSecSuiteApp(APISCANApp):
             debug=self.debug_var.get(),
             crawl=self.crawl_var.get(),
             auto_discover=self.discover_var.get(),
+            discover_analyze_js=self.discover_js_var.get(),
+            discover_read_robots=self.discover_robots_var.get(),
+            discover_osint=self.discover_osint_var.get(),
+            synthesize_fallback=self.synthesize_fallback_var.get(),
             crawl_fallback=self.crawl_fallback_var.get(),
             apiscan_checks=[k for k, v in self.api_vars.items() if v.get()],
             vulnapi_mode=self.vulnapi_mode_var.get(),

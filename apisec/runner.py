@@ -146,7 +146,7 @@ class ScanRunner:
         niente crawl, e allora VulnAPI passa alla modalita' curl invece di
         fallire, perche' su una sola URL qualcosa trova comunque.
         """
-        from .discovery import discover, save_spec
+        from .discovery import discover, save_spec, synthesize_spec
 
         say("[*] === Ricerca del documento OpenAPI ===")
         try:
@@ -158,6 +158,9 @@ class ScanRunner:
                 insecure=self.cfg.insecure,
                 proxy=self.cfg.proxy,
                 extra_paths=self.cfg.discover_extra_paths,
+                analyze_js=self.cfg.discover_analyze_js,
+                read_robots=self.cfg.discover_read_robots,
+                osint=self.cfg.discover_osint,
                 progress=say,
             )
         except Exception as exc:
@@ -176,7 +179,24 @@ class ScanRunner:
                 say(f"    salvato in {path}")
             return result
 
-        # Niente documento: si ripiega, dicendo su cosa.
+        # Nessun documento vero, ma forse una superficie ricostruita: la si
+        # trasforma in un OpenAPI sintetico. E' meno di un contratto ma piu' di
+        # un crawl alla cieca, perche' include i path visti solo nel JavaScript
+        # o negli archivi, che il crawler non raggiungerebbe.
+        if self.cfg.synthesize_fallback:
+            synth = synthesize_spec(result, self.cfg.target_url,
+                                    self.cfg.engine_dir("discovery"))
+            if synth is not None:
+                self.cfg.openapi = str(synth)
+                count = len(result.endpoint_map.endpoints)
+                say(f"[+] Nessun documento ufficiale, ma ho ricostruito "
+                    f"{count} endpoint: uso un OpenAPI sintetizzato.")
+                say(f"    salvato in {synth}")
+                say("[!] E' una mappa, non un contratto: mancano tipi e schemi, "
+                    "e la copertura dipende da cosa e' stato ricostruito.")
+                return result
+
+        # Niente documento e niente endpoint: si ripiega sul crawl.
         if self.cfg.crawl_fallback and "apiscan" in self.cfg.engines:
             self.cfg.crawl = True
             say("[!] Nessun documento trovato: APISCAN ne costruira' uno "
@@ -263,6 +283,20 @@ def _discovery_dict(discovery: object | None) -> dict | None:
     """
     if discovery is None:
         return None
+    emap = getattr(discovery, "endpoint_map", None)
+    surface = None
+    if emap is not None and getattr(emap, "endpoints", None):
+        surface = {
+            "count": len(emap.endpoints),
+            "per_source": dict(getattr(emap, "per_source", {}) or {}),
+            "js_files_read": getattr(emap, "js_files_read", 0),
+            "endpoints": [
+                {"path": ep.path, "methods": sorted(ep.methods),
+                 "sources": sorted(ep.sources), "templated": ep.templated}
+                for ep in emap.endpoints.values()
+            ],
+        }
+
     return {
         "base_url": getattr(discovery, "base_url", ""),
         "server": getattr(discovery, "server", ""),
@@ -271,6 +305,8 @@ def _discovery_dict(discovery: object | None) -> dict | None:
         "graphql": list(getattr(discovery, "graphql", []) or []),
         "well_known": list(getattr(discovery, "well_known", []) or []),
         "saved_to": str(getattr(discovery, "saved_to", "") or ""),
+        "synthesized_to": str(getattr(discovery, "synthesized_to", "") or ""),
+        "surface": surface,
         "errors": list(getattr(discovery, "errors", []) or []),
         "specs": [
             {

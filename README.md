@@ -141,39 +141,77 @@ bersaglio:
 ./run-scan.sh --url https://api.example.test --discover-only
 ```
 
-Tre strade, in ordine di costo:
+Prima cerca il **documento** vero, in ordine di costo:
 
 1. **Header `Link`** con `rel=describedby` o `service-desc`.
 2. **Pagine di documentazione** — Swagger-UI e ReDoc dichiarano l'URL dello
-   spec nel proprio HTML. È il percorso più prezioso: trova documenti a path
-   che nessuna wordlist indovinerebbe, tipo
-   `/static/contract/v2/service-description.json`.
-3. **Wordlist** di ~53 percorsi convenzionali, sondati in parallelo.
+   spec nel proprio HTML. Trova documenti a path che nessuna wordlist
+   indovinerebbe, tipo `/static/contract/v2/service-description.json`.
+3. **Wordlist** di ~100 percorsi convenzionali (framework Spring, ASP.NET,
+   WordPress, UI moderne come RapiDoc/Scalar), sondati in parallelo.
+
+Con un URL che ha un path (`https://host/api/v1`) **risale i livelli**: il
+documento sta quasi sempre più in alto, su `https://host/openapi.json`.
 
 **Un 200 non basta.** Molti server rispondono 200 con la propria SPA a
-qualunque path, e passare quell'HTML a uno scanner lo fa fallire più avanti con
-un errore incomprensibile. Ogni candidato viene scaricato, interpretato come
-JSON o YAML, e accettato solo se contiene operazioni vere. Il punteggio di
-affidabilità pesa `openapi`/`swagger`, il blocco `info`, e soprattutto il
-numero di operazioni.
+qualunque path. Ogni candidato viene scaricato, interpretato come JSON o YAML,
+e accettato solo se contiene operazioni vere.
 
-Vengono anche rilevati gli endpoint **GraphQL** (con una query minima
-`{__typename}`, non un'introspezione completa) e i percorsi `.well-known`.
+### Ricostruzione della superficie
 
-**Se non trova nulla**, il ripiego è automatico e dichiarato:
+Se il documento non c'è, la superficie dell'API **non è invisibile: è sparsa**.
+La suite la ricompone da:
 
-| Engine | Cosa succede |
-|---|---|
-| APISCAN | attiva `--crawl` e **costruisce** un contratto dagli endpoint trovati |
-| VulnAPI | passa alla modalità `curl`: non sa crawlare, ma sulla URL di base qualcosa trova |
+| Fonte | Cosa legge | Contatta |
+|---|---|---|
+| **Analisi JavaScript** | i path che la SPA chiama, nei suoi bundle (fetch/axios/URL, chunk webpack) | solo il bersaglio |
+| **robots.txt / sitemap.xml** | path dichiarati ed esclusi | solo il bersaglio |
+| **OSINT** (`--osint`) | URL storiche da Wayback Machine e Common Crawl | ⚠️ servizi terzi |
 
-Disattivabile con `--no-crawl-fallback`. Nella GUI c'è il pulsante **Cerca ora**
-nel tab `Engine`: trova il documento, lo salva, e compila il campo Swagger del
-tab `Target`.
+L'analisi JavaScript è la risposta esatta al caso "server che risponde 200 con
+la SPA a tutto": quella SPA *è* la mappa. Su un target che espone solo una SPA
+la suite ha ricostruito **13 endpoint** — inclusi `/api/v2/users/{id}` con il
+parametro di path riconosciuto, la base dei test BOLA.
 
-Un avvertimento che il report ripete: una scansione su un documento *trovato*
-copre la superficie che quel documento **dichiara**, che può essere più stretta
-di quella reale dell'API.
+**L'OSINT è opt-in** (`--osint`, default off) perché invia il nome del dominio
+a `web.archive.org` e `commoncrawl.org`, che lo registrano. Nella GUI chiede
+conferma prima di partire.
+
+### Sintesi dell'OpenAPI
+
+Dagli endpoint ricostruiti, la suite **sintetizza un OpenAPI 3.1** che entrambi
+gli engine consumano. I segmenti `{id}` diventano parametri di path, così gli
+scanner li riconoscono come punti di manipolazione. Non è un contratto — mancano
+tipi, schemi e risposte — ma è più preciso di un crawl alla cieca, perché
+include path che il crawler non raggiunge (quelli visti solo nel JavaScript o
+negli archivi).
+
+### La catena di ripiego
+
+Quando manca il documento, in ordine:
+
+1. **cerca** il documento vero (header, HTML, wordlist);
+2. **ricostruisce** la superficie (JS, robots, sitemap, OSINT);
+3. **sintetizza** un OpenAPI dagli endpoint — `--no-synthesize` per disattivare;
+4. **crawl** di APISCAN come ultimo ripiego — `--no-crawl-fallback` per
+   disattivare; VulnAPI passa a `curl`.
+
+Ogni fonte è attivabile singolarmente. Da CLI:
+
+```bash
+./run-scan.sh --url https://api.example.test --discover              # tutto tranne OSINT
+./run-scan.sh --url https://api.example.test --discover --osint      # anche archivi
+./run-scan.sh --url https://api.example.test --discover --no-js       # senza analisi JS
+./run-scan.sh --url https://api.example.test --discover-only          # solo ricerca
+```
+
+Nella GUI, tab `Engine` → card "Scoperta del contratto": una casella per ogni
+fonte, più il pulsante **Cerca ora** che ricostruisce, sintetizza, e compila il
+campo Swagger del tab `Target`.
+
+Un avvertimento che il report ripete: la copertura della scansione è quella del
+documento **usato** — trovato o sintetizzato — che può essere più stretta della
+superficie reale dell'API.
 
 ### Riga di comando
 

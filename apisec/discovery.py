@@ -33,32 +33,49 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urljoin, urlsplit
 
 #: Path convenzionali dei documenti. L'ordine e' indicativo: contano piu' i
-#: punteggi di validazione, ma a parita' vince chi viene prima.
+#: punteggi di validazione, ma a parita' vince chi viene prima. La lista e'
+#: ampliata con i percorsi piu' ricorrenti dai dataset pubblici (SecLists,
+#: Kiterunner) e dai default dei framework piu' diffusi.
 SPEC_PATHS: tuple[str, ...] = (
-    # I piu' comuni, per primi.
+    # --- i piu' comuni, per primi ---
     "openapi.json", "openapi.yaml", "openapi.yml",
     "swagger.json", "swagger.yaml", "swagger.yml",
-    "api-docs", "api-docs.json", "apidocs", "apidocs.json",
-    "v1/swagger.json", "v2/swagger.json", "v3/api-docs",
+    "api-docs", "api-docs.json", "api-docs.yaml",
+    "apidocs", "apidocs.json",
+    "v1/swagger.json", "v2/swagger.json", "v3/swagger.json",
+    "v1/openapi.json", "v2/openapi.json", "v3/openapi.json",
+    "v3/api-docs", "v2/api-docs", "v1/api-docs",
     "swagger/v1/swagger.json", "swagger/v2/swagger.json",
     "swagger-ui/swagger.json", "swagger-resources",
-    # Sotto /api.
-    "api/openapi.json", "api/openapi.yaml",
-    "api/swagger.json", "api/swagger.yaml",
+    "swagger-resources/configuration/ui",
+    # --- sotto /api ---
+    "api/openapi.json", "api/openapi.yaml", "api/openapi.yml",
+    "api/swagger.json", "api/swagger.yaml", "api/swagger.yml",
     "api/api-docs", "api/v1/api-docs", "api/v2/api-docs", "api/v3/api-docs",
-    "api/v1/swagger.json", "api/v2/swagger.json",
-    "api/docs", "api/doc", "api/spec", "api/schema",
-    "api/v1/openapi.json", "api/v2/openapi.json",
-    # Framework specifici.
-    "v3/api-docs/swagger-config",          # springdoc
-    "swagger/docs/v1", "swagger/docs/v2",  # ASP.NET
-    "docs/openapi.json", "docs/swagger.json",
-    "_spec", "spec.json", "schema.json", "schema.yaml",
-    "openapi", "swagger",
+    "api/v1/swagger.json", "api/v2/swagger.json", "api/v3/swagger.json",
+    "api/v1/openapi.json", "api/v2/openapi.json", "api/v3/openapi.json",
+    "api/docs", "api/doc", "api/spec", "api/schema", "api/swagger",
+    "api/swagger-ui.html", "api/swagger/ui", "api/swagger-resources",
+    "api/documentation", "api/openapi", "api/index.html",
+    # --- framework specifici ---
+    "v3/api-docs/swagger-config",              # springdoc
+    "v2/api-docs?group=", "swagger/docs/v1", "swagger/docs/v2",  # ASP.NET
+    "swagger/v1/swagger.yaml",
+    "docs/openapi.json", "docs/swagger.json", "docs/api-docs.json",
+    "_spec", "spec.json", "spec.yaml", "schema.json", "schema.yaml",
+    "graphql/schema.json",                     # apollo/graphql
+    "wp-json", "wp-json/wp/v2",                # WordPress REST
+    "rest/v1/openapi.json", "rest/api-docs",
     ".well-known/openapi.json",
-    # Path di documentazione: non sono spec ma ne dichiarano l'URL.
-    "docs", "swagger-ui.html", "swagger-ui/index.html", "swagger/index.html",
-    "redoc", "redoc.html", "api/docs/", "documentation",
+    "openapi", "swagger", "swagger.yaml",
+    "static/openapi.json", "static/swagger.json",
+    "assets/openapi.json", "public/openapi.json",
+    # --- pagine di documentazione: non sono spec ma ne dichiarano l'URL ---
+    "docs", "docs/", "documentation", "swagger-ui.html",
+    "swagger-ui/", "swagger-ui/index.html", "swagger/index.html",
+    "swagger/", "api-docs/", "redoc", "redoc.html", "api/docs/",
+    "rapidoc", "rapidoc.html", "scalar", "reference",     # UI moderne
+    "developer", "developers", "api/reference",
 )
 
 #: Endpoint GraphQL comuni. Non sono OpenAPI, ma sapere che ci sono cambia il
@@ -145,6 +162,11 @@ class DiscoveryResult:
     #: Richieste effettuate: utile per dire all'utente quanto si e' bussato.
     requests_made: int = 0
     errors: list[str] = field(default_factory=list)
+    #: Superficie ricostruita da JS/robots/sitemap/OSINT, quando quelle fonti
+    #: sono attive. Alimenta la sintesi di un OpenAPI quando non se ne trova uno.
+    endpoint_map: Any = None
+    #: Percorso dell'OpenAPI sintetizzato dagli endpoint, se e' stato prodotto.
+    synthesized_to: Path | None = None
     #: Basi effettivamente sondate: con una URL che ha un path si risale anche
     #: ai livelli superiori, ed e' bene che l'utente sappia dove si e' guardato.
     bases_probed: list[str] = field(default_factory=list)
@@ -268,9 +290,19 @@ def discover(
     proxy: str = "",
     extra_paths: Iterable[str] = (),
     find_graphql: bool = True,
+    analyze_js: bool = True,
+    read_robots: bool = True,
+    osint: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> DiscoveryResult:
     """Cerca il documento OpenAPI a partire dalla URL di base.
+
+    Oltre ai percorsi convenzionali e alle pagine di documentazione, quando
+    `analyze_js`/`read_robots` sono attivi ricostruisce la superficie
+    dell'API dai bundle JavaScript, da robots.txt e dalla sitemap; con `osint`
+    interroga anche gli archivi pubblici (che contattano servizi terzi). Gli
+    endpoint cosi' trovati servono a due cose: sondare path aggiuntivi per
+    scovare lo spec vero, e — se non se ne trova nessuno — sintetizzarne uno.
 
     Non solleva per i problemi di rete: li accumula in `errors`. Una discovery
     che fallisce deve poter essere seguita da una scansione con contratto
@@ -348,6 +380,45 @@ def discover(
         _probe_many(session, current, subset, timeout, workers, counter,
                     result, say)
 
+    # --- 2b) ricostruzione della superficie da JS, robots, sitemap, OSINT
+    # Gli endpoint trovati diventano path da sondare (magari lo spec sta sotto
+    # uno di essi) e, se non si trova un documento, la base per sintetizzarne
+    # uno.
+    if analyze_js or read_robots or osint:
+        from . import endpoints as _ep
+
+        emaps: list[Any] = []
+        target_emap = _ep.collect_from_target(
+            session, base, timeout=timeout,
+            analyze_js=analyze_js, read_robots=read_robots,
+            on_request=counter.tick, progress=say,
+        )
+        emaps.append(target_emap)
+
+        if osint:
+            say("[!] OSINT attivo: interrogo archivi pubblici. Il dominio del "
+                "bersaglio viene inviato a servizi terzi, che lo registrano.")
+            osint_emap = _ep.collect_from_osint(
+                session, base, timeout=max(timeout, 15.0),
+                on_request=counter.tick, progress=say,
+            )
+            emaps.append(osint_emap)
+
+        emap = _ep.merge_maps(*emaps)
+        result.endpoint_map = emap
+        result.errors.extend(emap.errors[:3])
+        for line in emap.summary_lines():
+            say(f"    {line}")
+
+        # Gli endpoint che *sembrano* documenti (finiscono in .json/.yaml o
+        # contengono swagger/openapi) meritano un tentativo diretto.
+        for path in emap.paths():
+            low = path.lower()
+            if (low.endswith((".json", ".yaml", ".yml"))
+                    or "swagger" in low or "openapi" in low or "api-docs" in low):
+                _consider(session, base.rstrip("/") + path, "endpoint-map",
+                          timeout, counter, result)
+
     # --- 3) well-known e GraphQL: pochi path, molto informativi
     say("[*] Percorsi .well-known")
     for path in WELL_KNOWN_PATHS:
@@ -391,6 +462,35 @@ def save_spec(result: DiscoveryResult, dest_dir: Path,
     path = dest_dir / f"discovered-openapi{suffix}"
     path.write_text(spec._body, encoding="utf-8")
     result.saved_to = path
+    return path
+
+
+def synthesize_spec(result: DiscoveryResult, target_url: str,
+                    dest_dir: Path, min_endpoints: int = 1) -> Path | None:
+    """Sintetizza e salva un OpenAPI dagli endpoint ricostruiti.
+
+    Da usare quando non si e' trovato un documento vero ma la ricostruzione
+    della superficie ha prodotto endpoint. Il file risultante non e' un
+    contratto — mancano tipi e schemi — ma dice agli scanner dove agire, ed e'
+    piu' preciso di un crawl perche' include path che il crawler non
+    raggiunge (quelli visti solo nel JavaScript o negli archivi).
+    """
+    import json
+
+    emap = result.endpoint_map
+    if emap is None or len(emap.endpoints) < min_endpoints:
+        return None
+
+    from . import endpoints as _ep
+    spec = _ep.synthesize(emap, target_url)
+    if not spec.get("paths"):
+        return None
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    path = dest_dir / "synthesized-openapi.json"
+    path.write_text(json.dumps(spec, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    result.synthesized_to = path
     return path
 
 
