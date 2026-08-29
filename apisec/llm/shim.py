@@ -212,6 +212,12 @@ def _make_handler(agent: str, token: str, settings: LLMSettings,
 
             prompt = _flatten_messages(messages)
             model = str(payload.get("model") or settings.model or "")
+            # Un client OpenAI deve mandare *qualcosa* in `model`, e senza una
+            # scelta esplicita quel qualcosa e' il nome dell'agente. Girarlo a
+            # `genera` diventerebbe `claude --model claude_cli`, che l'agente
+            # rifiuta: qui torna a essere "nessuna preferenza".
+            if model == agent:
+                model = ""
 
             started = time.time()
             try:
