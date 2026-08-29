@@ -128,6 +128,53 @@ originali e continuano a comandare APISCAN; `Engine`, `LLM` e `CI/CD` sono
 della suite. La configurazione dell'autenticazione compilata li' — otto flow,
 mTLS, form-login con auto-detect — alimenta **tutti** gli engine.
 
+### Non hai il documento OpenAPI?
+
+Entrambi gli engine ne vogliono uno. Se non ce l'hai, la suite lo cerca sul
+bersaglio:
+
+```bash
+# cerca il documento e poi scansiona
+./run-scan.sh --url https://api.example.test --discover
+
+# solo ricerca, nessun payload di attacco: guarda cosa c'è e basta
+./run-scan.sh --url https://api.example.test --discover-only
+```
+
+Tre strade, in ordine di costo:
+
+1. **Header `Link`** con `rel=describedby` o `service-desc`.
+2. **Pagine di documentazione** — Swagger-UI e ReDoc dichiarano l'URL dello
+   spec nel proprio HTML. È il percorso più prezioso: trova documenti a path
+   che nessuna wordlist indovinerebbe, tipo
+   `/static/contract/v2/service-description.json`.
+3. **Wordlist** di ~53 percorsi convenzionali, sondati in parallelo.
+
+**Un 200 non basta.** Molti server rispondono 200 con la propria SPA a
+qualunque path, e passare quell'HTML a uno scanner lo fa fallire più avanti con
+un errore incomprensibile. Ogni candidato viene scaricato, interpretato come
+JSON o YAML, e accettato solo se contiene operazioni vere. Il punteggio di
+affidabilità pesa `openapi`/`swagger`, il blocco `info`, e soprattutto il
+numero di operazioni.
+
+Vengono anche rilevati gli endpoint **GraphQL** (con una query minima
+`{__typename}`, non un'introspezione completa) e i percorsi `.well-known`.
+
+**Se non trova nulla**, il ripiego è automatico e dichiarato:
+
+| Engine | Cosa succede |
+|---|---|
+| APISCAN | attiva `--crawl` e **costruisce** un contratto dagli endpoint trovati |
+| VulnAPI | passa alla modalità `curl`: non sa crawlare, ma sulla URL di base qualcosa trova |
+
+Disattivabile con `--no-crawl-fallback`. Nella GUI c'è il pulsante **Cerca ora**
+nel tab `Engine`: trova il documento, lo salva, e compila il campo Swagger del
+tab `Target`.
+
+Un avvertimento che il report ripete: una scansione su un documento *trovato*
+copre la superficie che quel documento **dichiara**, che può essere più stretta
+di quella reale dell'API.
+
 ### Riga di comando
 
 ```bash

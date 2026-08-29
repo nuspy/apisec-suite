@@ -37,12 +37,14 @@ def write_html(findings: Sequence[Finding], dest: Path, *,
                cfg: ScanConfig | None = None,
                stats: MergeStats | None = None,
                analysis: Any = None,
+               discovery: Any = None,
                engine_results: Sequence[Any] = (),
                limitations: dict[str, list[str]] | None = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(
         render_html(findings, cfg=cfg, stats=stats, analysis=analysis,
-                    engine_results=engine_results, limitations=limitations),
+                    discovery=discovery, engine_results=engine_results,
+                    limitations=limitations),
         encoding="utf-8",
     )
     return dest
@@ -52,6 +54,7 @@ def render_html(findings: Sequence[Finding], *,
                 cfg: ScanConfig | None = None,
                 stats: MergeStats | None = None,
                 analysis: Any = None,
+                discovery: Any = None,
                 engine_results: Sequence[Any] = (),
                 limitations: dict[str, list[str]] | None = None) -> str:
     counts = count_by_severity(findings)
@@ -79,6 +82,7 @@ def render_html(findings: Sequence[Finding], *,
 <main class="wrap">
   {_score_section(score, counts, len(findings))}
   {_analysis_section(analysis)}
+  {_discovery_section(discovery)}
   {_stats_section(stats)}
   {_coverage_section(findings)}
   {_findings_section(findings)}
@@ -156,6 +160,71 @@ def _analysis_section(analysis: Any) -> str:
   {''.join(blocks)}
   <p class="muted small">Il verdetto del modello annota i finding, non li
   rimuove: un'indicazione di falso positivo va verificata, non creduta.</p>
+</section>"""
+
+
+def _discovery_section(discovery: Any) -> str:
+    """Come si e' arrivati al contratto usato per la scansione.
+
+    Conta piu' di quanto sembri: un report prodotto su un documento *trovato*
+    e non fornito descrive la superficie che quel documento dichiara, che puo'
+    essere piu' stretta di quella reale.
+    """
+    if discovery is None:
+        return ""
+
+    specs = list(getattr(discovery, "specs", []) or [])
+    graphql = list(getattr(discovery, "graphql", []) or [])
+    well_known = list(getattr(discovery, "well_known", []) or [])
+    best = getattr(discovery, "best", None)
+    requests_made = getattr(discovery, "requests_made", 0)
+    server = " ".join(x for x in (getattr(discovery, "server", ""),
+                                  getattr(discovery, "powered_by", "")) if x)
+
+    rows = []
+    for spec in specs[:10]:
+        chosen = " ✓" if spec is best else ""
+        rows.append(
+            f"<tr><th scope='row'><code>{html.escape(spec.url)}</code>{chosen}</th>"
+            f"<td data-l='Affidabilita'>{spec.confidence:.0%}</td>"
+            f"<td data-l='Tipo'>{html.escape(spec.kind)} {html.escape(spec.version)}</td>"
+            f"<td data-l='Operazioni'>{spec.operations} su {spec.paths} path</td>"
+            f"<td data-l='Origine'>{html.escape(spec.source)}</td></tr>")
+
+    table = ""
+    if rows:
+        table = f"""
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th scope="col">Documento</th><th scope="col">Affidabilita'</th>
+      <th scope="col">Tipo</th><th scope="col">Operazioni</th>
+      <th scope="col">Origine</th></tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table>
+  </div>"""
+    else:
+        table = ('<p class="warn">Nessun documento OpenAPI trovato sul '
+                 'bersaglio.</p>')
+
+    extra = []
+    if server:
+        extra.append(f"<li>Tecnologia rilevata: {html.escape(server)}</li>")
+    if graphql:
+        extra.append("<li>GraphQL: " + ", ".join(
+            f"<code>{html.escape(u)}</code>" for u in graphql[:5]) + "</li>")
+    if well_known:
+        extra.append("<li>Well-known: " + ", ".join(
+            f"<code>{html.escape(u)}</code>" for u in well_known[:5]) + "</li>")
+    extra.append(f"<li>Richieste di sola lettura effettuate: {requests_made}</li>")
+
+    return f"""
+<section aria-labelledby="h-disc">
+  <h2 id="h-disc">Scoperta del contratto</h2>
+  <p class="muted">Il documento non e' stato fornito ma cercato sul bersaglio.
+  La copertura della scansione e' quella dichiarata dal documento trovato, che
+  puo' essere piu' stretta della superficie reale dell'API.</p>
+  {table}
+  <ul class="small muted">{''.join(extra)}</ul>
 </section>"""
 
 

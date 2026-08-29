@@ -123,6 +123,17 @@ class ScanConfig:
     auth: AuthConfig = field(default_factory=AuthConfig)
     llm: LLMSettings = field(default_factory=LLMSettings)
 
+    # --- scoperta del contratto ---
+    #: Cerca il documento OpenAPI sul bersaglio quando non ne viene fornito uno.
+    #: Sonda i path convenzionali e legge le pagine Swagger-UI/ReDoc.
+    auto_discover: bool = False
+    #: Percorsi aggiuntivi da sondare, oltre a quelli convenzionali.
+    discover_extra_paths: list[str] = field(default_factory=list)
+    #: Se la ricerca non trova nulla, lascia che APISCAN costruisca un
+    #: contratto crawlando gli endpoint. E' piu' lento e meno accurato di un
+    #: documento vero, ma e' meglio di non scansionare affatto.
+    crawl_fallback: bool = True
+
     # --- comuni a piu' engine ---
     threads: int = 16
     timeout: float = 5.0
@@ -188,8 +199,12 @@ class ScanConfig:
             errors.append("target_url deve iniziare con http:// o https://")
         if not self.engines:
             errors.append("nessun engine selezionato")
-        if "vulnapi" in self.engines and self.vulnapi_mode == "openapi" and not self.openapi:
-            errors.append("vulnapi in modalita' openapi richiede un file OpenAPI")
+        if ("vulnapi" in self.engines and self.vulnapi_mode == "openapi"
+                and not self.openapi and not self.auto_discover):
+            errors.append(
+                "vulnapi in modalita' openapi richiede un file OpenAPI: "
+                "fornirlo, oppure attivare la ricerca automatica"
+            )
         if self.openapi and not Path(self.openapi).exists():
             # Una URL remota e' lecita: vulnapi e APISCAN la scaricano loro.
             if not self.openapi.lower().startswith(("http://", "https://")):

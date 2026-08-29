@@ -49,6 +49,24 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--crawl", action="store_true",
                         help="lascia che APISCAN scopra gli endpoint da solo")
 
+    disc = parser.add_argument_group("scoperta del contratto")
+    disc.add_argument("--discover", action="store_true",
+                      help="cerca il documento OpenAPI sul bersaglio invece di "
+                           "fornirlo: sonda i percorsi convenzionali e legge le "
+                           "pagine Swagger-UI/ReDoc")
+    disc.add_argument("--discover-only", action="store_true",
+                      help="esegui solo la ricerca e mostra cosa trovi, senza "
+                           "scansionare")
+    disc.add_argument("--discover-path", action="append", default=[],
+                      metavar="PERCORSO",
+                      help="percorso aggiuntivo da sondare, ripetibile")
+    disc.add_argument("--no-crawl-fallback", dest="crawl_fallback",
+                      action="store_false", default=True,
+                      help="se non trova il documento, non lasciare che APISCAN "
+                           "ne costruisca uno crawlando")
+    disc.add_argument("--save-spec", default="",
+                      help="salva anche qui il documento trovato")
+
     engines = parser.add_argument_group("engine")
     engines.add_argument("--engines", default="vulnapi,apiscan",
                          help="engine da eseguire, separati da virgola "
@@ -204,6 +222,11 @@ def config_from_args(args: argparse.Namespace) -> ScanConfig:
         insecure=args.insecure,
         debug=args.debug,
         crawl=args.crawl,
+        # --discover-only implica la ricerca: chiederla e poi non eseguirla
+        # sarebbe l'unica lettura possibile, ma inutile.
+        auto_discover=args.discover or args.discover_only,
+        discover_extra_paths=args.discover_path,
+        crawl_fallback=args.crawl_fallback,
         apiscan_checks=split_list(args.checks),
         vulnapi_mode=args.vulnapi_mode,
         vulnapi_scans=split_list(args.scans),
@@ -250,6 +273,56 @@ def print_llm_inventory() -> int:
     return EXIT_OK
 
 
+def run_discovery_only(cfg: ScanConfig, args: argparse.Namespace) -> int:
+    """Solo ricerca del documento, senza scansionare.
+
+    Utile per capire cosa c'e' su un bersaglio prima di decidere se e come
+    scansionarlo: fa solo richieste di lettura, nessun payload di attacco.
+    """
+    from apisec.discovery import discover, save_spec
+
+    result = discover(
+        cfg.target_url,
+        headers=cfg.auth.as_headers(),
+        timeout=cfg.timeout if cfg.timeout > 0 else 8.0,
+        workers=max(4, min(cfg.threads, 16)),
+        insecure=cfg.insecure,
+        proxy=cfg.proxy,
+        extra_paths=cfg.discover_extra_paths,
+        progress=lambda line: print(line, flush=True),
+    )
+
+    print()
+    print("=" * 62)
+    for line in result.summary_lines():
+        print(line)
+    print("=" * 62)
+
+    if result.errors:
+        print(f"Errori di rete (primi {len(result.errors)}): "
+              f"{'; '.join(result.errors)}", file=sys.stderr)
+
+    best = result.best
+    if best is None:
+        print("\nNessun documento utilizzabile. Opzioni:", file=sys.stderr)
+        print("  - indicare percorsi aggiuntivi con --discover-path", file=sys.stderr)
+        print("  - lasciare che APISCAN ne costruisca uno: --crawl", file=sys.stderr)
+        return EXIT_NO_ENGINE
+
+    destination = Path(args.save_spec) if args.save_spec else cfg.run_dir()
+    if destination.suffix:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(best._body, encoding="utf-8")
+        saved = destination
+    else:
+        saved = save_spec(result, destination)
+
+    print(f"\nDocumento salvato in: {saved}")
+    print(f"Per scansionarlo:\n"
+          f"  --url {cfg.target_url} --openapi {saved}")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -276,6 +349,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[!] Engine sconosciuti: {', '.join(unknown)}. "
               f"Disponibili: {', '.join(ENGINE_ORDER)}", file=sys.stderr)
         return EXIT_CONFIG
+
+    if args.discover_only:
+        return run_discovery_only(cfg, args)
 
     def progress(line: str) -> None:
         if not args.quiet or line.startswith(("[+]", "[!]")):

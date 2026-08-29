@@ -101,6 +101,11 @@ class ApiSecSuiteApp(APISCANApp):
         self.suite_output_var = StringVar(value=str(Path.cwd() / "apisec_out"))
         self.fail_on_var = StringVar(value="high")
 
+        # --- scoperta del contratto ---
+        self.discover_var = BooleanVar(value=True)
+        self.crawl_fallback_var = BooleanVar(value=True)
+        self.discover_status_var = StringVar(value="non eseguita")
+
         # --- LLM ---
         self.llm_enabled_var = BooleanVar(value=False)
         self.llm_registry_var = StringVar(value="llmswitch")
@@ -240,6 +245,51 @@ class ApiSecSuiteApp(APISCANApp):
                            state="readonly", width=12),
               "usata dal riepilogo e dalla CLI")
 
+        # --- scoperta del contratto ---
+        card3 = _make_card(parent, "Scoperta del contratto")
+        card3.pack(fill="x", padx=10, pady=6)
+        disc = card3.content
+        disc.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            disc,
+            text="Entrambi gli engine vogliono un OpenAPI. Se non lo hai, lo si "
+                 "puo' cercare sul bersaglio: vengono sondati i percorsi "
+                 "convenzionali e lette le pagine Swagger-UI/ReDoc, che spesso "
+                 "dichiarano l'URL del documento anche quando sta in un posto "
+                 "imprevedibile.",
+            style="Muted.TLabel", wraplength=780, justify="left").grid(
+            row=0, column=0, columnspan=3, sticky=W, padx=14, pady=(6, 8))
+
+        ttk.Checkbutton(
+            disc, text="Cerca il documento se il campo Swagger e' vuoto",
+            variable=self.discover_var, style="Card.TCheckbutton").grid(
+            row=1, column=0, columnspan=3, sticky=W, padx=14, pady=2)
+        ttk.Checkbutton(
+            disc,
+            text="Se non lo trova, lascia che APISCAN ne costruisca uno "
+                 "crawlando gli endpoint",
+            variable=self.crawl_fallback_var, style="Card.TCheckbutton").grid(
+            row=2, column=0, columnspan=3, sticky=W, padx=14, pady=2)
+
+        actions = ttk.Frame(disc, style="Card.TFrame")
+        actions.grid(row=3, column=0, columnspan=3, sticky="ew", padx=14,
+                     pady=(10, 8))
+        self.discover_btn = ttk.Button(
+            actions, text="Cerca ora", style="Small.TButton",
+            command=self._discover_now)
+        self.discover_btn.pack(side="left")
+        ttk.Label(actions, textvariable=self.discover_status_var,
+                  style="Muted.TLabel").pack(side="left", padx=12)
+
+        ttk.Label(
+            disc,
+            text="«Cerca ora» fa solo richieste di lettura: nessun payload di "
+                 "attacco. Il documento trovato viene salvato e scritto nel "
+                 "campo Swagger del tab Target.",
+            style="Muted.TLabel", wraplength=780, justify="left").grid(
+            row=4, column=0, columnspan=3, sticky=W, padx=14, pady=(0, 8))
+
         note = ttk.Label(
             parent,
             text="Nota: su un OpenAPI ampio VulnAPI e' lento — applica un rate "
@@ -247,6 +297,77 @@ class ApiSecSuiteApp(APISCANApp):
                  "operazione. E' normale che impieghi piu' di APISCAN.",
             style="Muted.TLabel", wraplength=780, justify="left")
         note.pack(anchor=W, padx=24, pady=(4, 10))
+
+    def _discover_now(self) -> None:
+        """Cerca il documento e compila il campo Swagger del tab Target."""
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showwarning("Bersaglio mancante",
+                                   "Indica la URL nel tab Target.")
+            return
+
+        self.discover_btn.configure(state=DISABLED)
+        self.discover_status_var.set("ricerca in corso...")
+        self._hide_banner()
+        self._log("=" * 62, "header")
+        self._log("  Ricerca del documento OpenAPI", "header")
+        self._log("=" * 62, "header")
+
+        def work() -> None:
+            from ..discovery import discover, save_spec
+            try:
+                result = discover(
+                    url,
+                    headers=self._suite_config().auth.as_headers(),
+                    timeout=_as_float(self.timeout_var.get(), 8.0) or 8.0,
+                    insecure=self.insecure_var.get(),
+                    proxy=self.proxy_var.get().strip(),
+                    progress=lambda line: self.text_queue.put(line),
+                )
+            except Exception as exc:
+                self.text_queue.put(f"[!] Ricerca fallita: {exc}")
+                self.root.after(0, lambda: self._discover_done(None, None))
+                return
+
+            for line in result.summary_lines():
+                self.text_queue.put(f"    {line}")
+
+            saved = None
+            if result.best is not None:
+                target_dir = Path(self.suite_output_var.get().strip()
+                                  or "apisec_out") / "discovery"
+                try:
+                    saved = save_spec(result, target_dir)
+                except OSError as exc:
+                    self.text_queue.put(f"[!] Salvataggio fallito: {exc}")
+            self.root.after(0, lambda: self._discover_done(result, saved))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _discover_done(self, result: object | None, saved: Path | None) -> None:
+        self.discover_btn.configure(state=NORMAL)
+
+        if result is None:
+            self.discover_status_var.set("ricerca fallita")
+            return
+
+        best = getattr(result, "best", None)
+        if best is None:
+            self.discover_status_var.set("nessun documento trovato")
+            self._log("[!] Nessun documento trovato. Alla scansione, APISCAN "
+                      "puo' costruirne uno crawlando (opzione qui sopra).",
+                      "yellow")
+            return
+
+        self.discover_status_var.set(
+            f"trovato: {best.operations} operazioni ({best.confidence:.0%})")
+        if saved is not None:
+            # Compilare il campo del tab Target e' il punto dell'operazione:
+            # da qui in poi la scansione parte come se il file fosse stato
+            # indicato a mano.
+            self.swagger_var.set(str(saved))
+            self._log(f"[+] Documento salvato e impostato: {saved}", "green")
+            self._notebook.select(0)
 
     def _browse_output(self) -> None:
         chosen = filedialog.askdirectory(title="Cartella di output")
@@ -610,6 +731,8 @@ class ApiSecSuiteApp(APISCANApp):
             insecure=self.insecure_var.get(),
             debug=self.debug_var.get(),
             crawl=self.crawl_var.get(),
+            auto_discover=self.discover_var.get(),
+            crawl_fallback=self.crawl_fallback_var.get(),
             apiscan_checks=[k for k, v in self.api_vars.items() if v.get()],
             vulnapi_mode=self.vulnapi_mode_var.get(),
             vulnapi_scans=_split(self.vulnapi_scans_var.get()),

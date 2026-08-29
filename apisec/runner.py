@@ -38,6 +38,8 @@ class ScanOutcome:
     results: list[EngineResult] = field(default_factory=list)
     stats: MergeStats | None = None
     analysis: object | None = None
+    #: Esito della ricerca del documento OpenAPI, quando e' stata eseguita.
+    discovery: object | None = None
     artifacts: dict[str, Path] = field(default_factory=dict)
     duration_s: float = 0.0
 
@@ -104,6 +106,9 @@ class ScanRunner:
         run_dir = self.cfg.run_dir()
         say(f"[*] Cartella della run: {run_dir}")
 
+        if self.cfg.auto_discover and not self.cfg.openapi:
+            outcome.discovery = self._discover(say)
+
         sink: LineSink = line_sink or (lambda engine, line: say(f"[{engine}] {line}"))
 
         for engine in self.engines:
@@ -132,6 +137,61 @@ class ScanRunner:
         return outcome
 
     # ------------------------------------------------------------------ #
+
+    def _discover(self, say: Progress) -> object | None:
+        """Cerca il documento OpenAPI sul bersaglio e configura gli engine.
+
+        Tre esiti, tutti gestiti: documento trovato e usato; niente trovato ma
+        crawl disponibile, quindi APISCAN se lo costruisce; niente trovato e
+        niente crawl, e allora VulnAPI passa alla modalita' curl invece di
+        fallire, perche' su una sola URL qualcosa trova comunque.
+        """
+        from .discovery import discover, save_spec
+
+        say("[*] === Ricerca del documento OpenAPI ===")
+        try:
+            result = discover(
+                self.cfg.target_url,
+                headers=self.cfg.auth.as_headers(),
+                timeout=self.cfg.timeout if self.cfg.timeout > 0 else 8.0,
+                workers=max(4, min(self.cfg.threads, 16)),
+                insecure=self.cfg.insecure,
+                proxy=self.cfg.proxy,
+                extra_paths=self.cfg.discover_extra_paths,
+                progress=say,
+            )
+        except Exception as exc:
+            say(f"[!] Ricerca fallita: {exc}")
+            return None
+
+        for line in result.summary_lines():
+            say(f"    {line}")
+
+        best = result.best
+        if best is not None:
+            path = save_spec(result, self.cfg.engine_dir("discovery"))
+            if path is not None:
+                self.cfg.openapi = str(path)
+                say(f"[+] Uso il documento trovato: {best.url}")
+                say(f"    salvato in {path}")
+            return result
+
+        # Niente documento: si ripiega, dicendo su cosa.
+        if self.cfg.crawl_fallback and "apiscan" in self.cfg.engines:
+            self.cfg.crawl = True
+            say("[!] Nessun documento trovato: APISCAN ne costruira' uno "
+                "crawlando gli endpoint (piu' lento e meno accurato).")
+            if "vulnapi" in self.cfg.engines and self.cfg.vulnapi_mode == "openapi":
+                # VulnAPI non sa crawlare e senza contratto non parte: in
+                # modalita' curl esamina almeno la URL di base.
+                self.cfg.vulnapi_mode = "curl"
+                say("[!] VulnAPI passa alla modalita' curl: senza contratto "
+                    "esaminera' solo la URL di base.")
+        elif "vulnapi" in self.cfg.engines and self.cfg.vulnapi_mode == "openapi":
+            self.cfg.vulnapi_mode = "curl"
+            say("[!] Nessun documento trovato: VulnAPI passa alla modalita' curl.")
+
+        return result
 
     def _analyze(self, findings: Sequence[Finding], say: Progress) -> object | None:
         try:
@@ -170,6 +230,7 @@ class ScanRunner:
             ],
             "analysis": (outcome.analysis.to_dict()
                          if hasattr(outcome.analysis, "to_dict") else None),
+            "discovery": _discovery_dict(outcome.discovery),
             "findings": [f.to_dict() for f in outcome.findings],
         }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         artifacts["json"] = json_path
@@ -184,6 +245,7 @@ class ScanRunner:
         html_path = write_html(
             outcome.findings, run_dir / "report.html",
             cfg=self.cfg, stats=outcome.stats, analysis=outcome.analysis,
+            discovery=outcome.discovery,
             engine_results=outcome.results, limitations=limitations,
         )
         artifacts["html"] = html_path
@@ -191,6 +253,34 @@ class ScanRunner:
         for name, path in artifacts.items():
             say(f"[+] {name}: {path}")
         return artifacts
+
+
+def _discovery_dict(discovery: object | None) -> dict | None:
+    """Serializza l'esito della ricerca, senza il corpo dei documenti.
+
+    Il contenuto degli spec non entra nel JSON dei finding: e' gia' salvato su
+    disco, e duplicarlo qui renderebbe il file pesante e illeggibile.
+    """
+    if discovery is None:
+        return None
+    return {
+        "base_url": getattr(discovery, "base_url", ""),
+        "server": getattr(discovery, "server", ""),
+        "powered_by": getattr(discovery, "powered_by", ""),
+        "requests_made": getattr(discovery, "requests_made", 0),
+        "graphql": list(getattr(discovery, "graphql", []) or []),
+        "well_known": list(getattr(discovery, "well_known", []) or []),
+        "saved_to": str(getattr(discovery, "saved_to", "") or ""),
+        "errors": list(getattr(discovery, "errors", []) or []),
+        "specs": [
+            {
+                "url": s.url, "confidence": s.confidence, "kind": s.kind,
+                "version": s.version, "title": s.title, "paths": s.paths,
+                "operations": s.operations, "source": s.source, "size": s.size,
+            }
+            for s in (getattr(discovery, "specs", []) or [])
+        ],
+    }
 
 
 def run_scan(cfg: ScanConfig, progress: Progress | None = None,
