@@ -145,11 +145,87 @@ class DiscoveryResult:
     #: Richieste effettuate: utile per dire all'utente quanto si e' bussato.
     requests_made: int = 0
     errors: list[str] = field(default_factory=list)
+    #: Basi effettivamente sondate: con una URL che ha un path si risale anche
+    #: ai livelli superiori, ed e' bene che l'utente sappia dove si e' guardato.
+    bases_probed: list[str] = field(default_factory=list)
+    #: Quante risposte per codice di stato. Distingue "non c'e' niente" da
+    #: "e' tutto protetto" da "l'host non risponde".
+    status_counts: dict[int, int] = field(default_factory=dict)
+    #: Richieste fallite prima di ricevere una risposta.
+    network_errors: int = 0
+    #: L'host ha risposto almeno una volta.
+    reachable: bool = False
 
     @property
     def best(self) -> SpecCandidate | None:
         usable = [s for s in self.specs if s.confidence >= MIN_CONFIDENCE]
         return usable[0] if usable else None
+
+    def diagnosis(self) -> list[str]:
+        """Perche' non si e' trovato nulla, e cosa si puo' fare.
+
+        «Nessun documento trovato» da solo non dice se il bersaglio non ne ha,
+        se sono tutti protetti, o se non lo si e' proprio raggiunto: sono tre
+        situazioni con tre rimedi diversi.
+        """
+        if self.best is not None:
+            return []
+
+        notes: list[str] = []
+
+        if not self.reachable:
+            notes.append(
+                f"L'host non ha risposto a nessuna delle {self.requests_made} "
+                f"richieste ({self.network_errors} errori di rete). Verificare "
+                f"che la URL sia raggiungibile da questa macchina, lo schema "
+                f"http/https, ed eventuali proxy o firewall."
+            )
+            if self.errors:
+                notes.append(f"Primo errore: {self.errors[0]}")
+            return notes
+
+        protected = sum(self.status_counts.get(code, 0) for code in (401, 403))
+        if protected:
+            notes.append(
+                f"{protected} percorsi hanno risposto 401/403: il documento "
+                f"potrebbe esserci ma essere protetto. Compilare le credenziali "
+                f"nel tab Authentication e ripetere la ricerca."
+            )
+
+        # La soglia evita di scomodare la spiegazione del "risponde 200 a
+        # tutto" quando i 200 sono uno o due: li' e' semplicemente la radice
+        # che risponde, e il messaggio pertinente e' un altro.
+        ok_count = self.status_counts.get(200, 0)
+        if ok_count >= 3 and not self.specs:
+            notes.append(
+                f"{ok_count} percorsi hanno risposto 200 ma nessuno conteneva "
+                f"un contratto valido: probabilmente il server risponde con la "
+                f"stessa pagina a qualunque indirizzo."
+            )
+
+        if self.status_counts.get(429):
+            notes.append(
+                f"{self.status_counts[429]} risposte 429 (troppe richieste): "
+                f"il bersaglio sta limitando il traffico e la ricerca puo' "
+                f"essere incompleta. Riprovare con meno thread."
+            )
+
+        redirects = sum(count for code, count in self.status_counts.items()
+                        if 300 <= code < 400)
+        if redirects:
+            notes.append(
+                f"{redirects} redirect non seguiti fino a una risposta utile: "
+                f"il servizio potrebbe stare a un indirizzo diverso."
+            )
+
+        if not notes:
+            notes.append(
+                "Il bersaglio ha risposto ma nessun percorso conteneva un "
+                "documento. Se sai dove sta, indicalo con --discover-path "
+                "(oppure compila il campo Swagger a mano)."
+            )
+        notes.append(f"Percorsi di base esaminati: {', '.join(self.bases_probed)}")
+        return notes
 
     def summary_lines(self) -> list[str]:
         lines: list[str] = []
@@ -167,7 +243,16 @@ class DiscoveryResult:
             lines.append(f"GraphQL: {', '.join(self.graphql)}")
         if self.well_known:
             lines.append(f"Well-known: {', '.join(self.well_known)}")
-        lines.append(f"Richieste effettuate: {self.requests_made}")
+        if self.status_counts:
+            summary = ", ".join(
+                f"{code}×{count}"
+                for code, count in sorted(self.status_counts.items())
+            )
+            lines.append(f"Risposte: {summary}")
+        lines.append(f"Richieste effettuate: {self.requests_made}"
+                     + (f" ({self.network_errors} senza risposta)"
+                        if self.network_errors else ""))
+        lines.extend(self.diagnosis())
         return lines
 
 
@@ -219,33 +304,65 @@ def discover(
     if headers:
         session.headers.update(headers)
 
-    counter = _Counter()
+    counter = _Counter(result)
 
-    # --- 1) la radice: header e, se e' una pagina di documentazione, il suo HTML
-    say("[*] Analisi della radice")
-    root = _fetch(session, base + "/", timeout, counter, result)
-    if root is not None:
-        result.server = root.headers.get("Server", "")
-        result.powered_by = root.headers.get("X-Powered-By", "")
-        for url in _spec_urls_from_headers(root.headers, base):
+    # Con una URL che ha un path (`https://host/api/v1`) il documento sta
+    # spesso piu' in alto: su `https://host/openapi.json` o `/docs`. Cercare
+    # solo sotto il path indicato e' il motivo piu' comune per cui una ricerca
+    # non trova niente pur essendoci qualcosa.
+    bases = _candidate_bases(base)
+    result.bases_probed = list(bases)
+    if len(bases) > 1:
+        say(f"[*] La URL ha un percorso: cerco anche in "
+            f"{', '.join(bases[1:])}")
+
+    # --- 1) la radice di ogni base: header e pagine di documentazione
+    for index, current in enumerate(bases):
+        say(f"[*] Analisi di {current}")
+        root = _fetch(session, current + "/", timeout, counter, result)
+        if root is None:
+            continue
+        if index == 0 or not result.server:
+            result.server = root.headers.get("Server", "") or result.server
+            result.powered_by = (root.headers.get("X-Powered-By", "")
+                                 or result.powered_by)
+        for url in _spec_urls_from_headers(root.headers, current):
             _consider(session, url, "header", timeout, counter, result)
         if _looks_like_html(root):
-            for url in _spec_urls_from_html(root.text[:400_000], root.url or base):
+            try:
+                html_text = _read_capped(root, 400_000)
+            finally:
+                root.close()
+            for url in _spec_urls_from_html(html_text, current + "/"):
                 _consider(session, url, "html", timeout, counter, result)
+        else:
+            root.close()
 
-    # --- 2) wordlist, in parallelo
+    # --- 2) wordlist, in parallelo su ogni base
     paths = list(dict.fromkeys(list(SPEC_PATHS) + list(extra_paths)))
-    say(f"[*] Sondaggio di {len(paths)} percorsi convenzionali")
-    _probe_many(session, base, paths, timeout, workers, counter, result, say)
+    for index, current in enumerate(bases):
+        # Sulla base indicata dall'utente si prova tutto; sui livelli superiori
+        # solo i percorsi piu' probabili, per non moltiplicare le richieste.
+        subset = paths if index == 0 else paths[:24]
+        say(f"[*] Sondaggio di {len(subset)} percorsi su {current}")
+        _probe_many(session, current, subset, timeout, workers, counter,
+                    result, say)
 
     # --- 3) well-known e GraphQL: pochi path, molto informativi
     say("[*] Percorsi .well-known")
     for path in WELL_KNOWN_PATHS:
         url = f"{base}/{path}"
         response = _fetch(session, url, timeout, counter, result)
-        if response is not None and response.status_code == 200:
-            result.well_known.append(url)
-            _consider_response(response, url, "well-known", result)
+        if response is None or response.status_code != 200:
+            continue
+        # Un server che serve la propria SPA a qualunque indirizzo risponde
+        # 200 anche qui: elencarli tutti come "well-known trovati" sarebbe
+        # cinque falsi positivi di fila. Un descrittore vero non e' HTML.
+        if _looks_like_html(response):
+            response.close()
+            continue
+        result.well_known.append(url)
+        _consider_response(response, url, "well-known", result)
 
     if find_graphql:
         say("[*] Endpoint GraphQL")
@@ -281,18 +398,61 @@ def save_spec(result: DiscoveryResult, dest_dir: Path,
 # Interne
 # ---------------------------------------------------------------------- #
 
-class _Counter:
-    """Contatore di richieste, condiviso fra i thread.
+def _candidate_bases(base: str) -> list[str]:
+    """La base indicata piu' i suoi livelli superiori, dal piu' specifico.
 
-    Il GIL rende l'incremento di un int abbastanza sicuro da non giustificare
-    un lock qui: il valore serve a informare l'utente, non a decidere nulla.
+        https://host/api/v1  ->  [https://host/api/v1, https://host/api,
+                                  https://host]
+
+    Si fermano a tre per non moltiplicare le richieste: oltre il secondo
+    livello di risalita la probabilita' di trovare il documento cala molto piu'
+    in fretta di quanto cresca il costo.
+    """
+    parts = urlsplit(base)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    segments = [s for s in parts.path.split("/") if s]
+
+    bases = [base.rstrip("/")]
+    while segments:
+        segments.pop()
+        candidate = origin + ("/" + "/".join(segments) if segments else "")
+        if candidate not in bases:
+            bases.append(candidate)
+        if len(bases) >= 3:
+            break
+    return bases
+
+
+class _Counter:
+    """Contabilita' delle richieste, condivisa fra i thread di sondaggio.
+
+    Con un lock e non affidandosi al GIL: `d[k] = d.get(k, 0) + 1` non e'
+    atomico e sotto concorrenza perde incrementi. Questi numeri finiscono nella
+    diagnosi mostrata all'utente quando la ricerca non trova nulla, e un
+    conteggio sbagliato manderebbe fuori strada proprio quando serve orientarsi.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, result: "DiscoveryResult") -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._result = result
         self.value = 0
 
     def tick(self) -> None:
-        self.value += 1
+        with self._lock:
+            self.value += 1
+
+    def record_status(self, code: int) -> None:
+        with self._lock:
+            self._result.reachable = True
+            self._result.status_counts[code] = (
+                self._result.status_counts.get(code, 0) + 1)
+
+    def record_error(self, message: str) -> None:
+        with self._lock:
+            self._result.network_errors += 1
+            if len(self._result.errors) < 5:
+                self._result.errors.append(message)
 
 
 def _fetch(session: Any, url: str, timeout: float, counter: _Counter,
@@ -300,18 +460,21 @@ def _fetch(session: Any, url: str, timeout: float, counter: _Counter,
     import requests
     counter.tick()
     try:
-        return session.request(
+        response = session.request(
             method, url, timeout=timeout, allow_redirects=True,
             # `stream` per poter interrompere prima di scaricare un file enorme.
             stream=True,
         )
     except requests.RequestException as exc:
         # Un path che non risponde e' la norma durante una discovery: si
-        # registra solo il primo errore per host, per non riempire il report.
-        message = f"{type(exc).__name__} su {url}"
-        if len(result.errors) < 5:
-            result.errors.append(message)
+        # registrano solo i primi errori, per non riempire il report.
+        counter.record_error(f"{type(exc).__name__} su {url}")
         return None
+
+    # Le statistiche servono a distinguere «non c'e' niente» da «e' tutto
+    # protetto» da «non ho raggiunto l'host»: tre esiti con tre rimedi diversi.
+    counter.record_status(response.status_code)
+    return response
 
 
 def _probe_many(session: Any, base: str, paths: list[str], timeout: float,
