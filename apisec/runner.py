@@ -98,6 +98,9 @@ class ScanRunner:
                 progress(message)
 
         self.cfg.require_valid()
+        for note in self.cfg.warnings():
+            say(f"[!] {note}")
+
         run_dir = self.cfg.run_dir()
         say(f"[*] Cartella della run: {run_dir}")
 

@@ -201,6 +201,47 @@ class ScanConfig:
         if errors:
             raise ConfigError("; ".join(errors))
 
+    def warnings(self) -> list[str]:
+        """Configurazioni lecite ma che non fanno quello che sembra.
+
+        Non bloccano la scansione: la avviano dicendo cosa succedera' davvero.
+        """
+        notes: list[str] = []
+
+        # In APISCAN `--api11` non si somma alle altre categorie, le
+        # SOSTITUISCE: `selected_apis = [11] if args.api11 else [...]`.
+        # Selezionarlo insieme ad API1-API10 fa girare la sola analisi AI, e
+        # senza questo avviso l'utente crede di aver eseguito tutto.
+        checks = set(self.apiscan_checks)
+        if "api11" in checks and checks - {"api11"}:
+            others = ", ".join(sorted(checks - {"api11"}))
+            notes.append(
+                f"APISCAN: API11 (analisi AI) esclude le altre categorie. "
+                f"Verranno saltate: {others}. Per eseguirle tutte, lancia due "
+                f"scansioni separate."
+            )
+
+        if self.llm.enabled and self.llm.drive_apiscan and "api11" not in checks:
+            notes.append(
+                "LLM attivo ma API11 non selezionato: APISCAN ricevera' la "
+                "configurazione del provider senza usarla. L'analisi della "
+                "suite sui finding uniti gira comunque."
+            )
+
+        if self.insecure:
+            notes.append(
+                "Verifica dei certificati TLS disattivata (--insecure): il "
+                "traffico e' esposto a intercettazione."
+            )
+
+        if "vulnapi" in self.engines and self.vulnapi_mode == "curl":
+            notes.append(
+                "VulnAPI in modalita' curl esamina solo l'URL indicato, non "
+                "gli endpoint dell'OpenAPI: la copertura sara' molto ridotta."
+            )
+
+        return notes
+
     def run_dir(self) -> Path:
         """Cartella della run, creata al primo accesso."""
         d = self.output_dir / f"scan_{self.run_id}"
