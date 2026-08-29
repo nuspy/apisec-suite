@@ -42,24 +42,85 @@ credentials"* diventa un finding solo, con due conferme indipendenti.
 
 ## Installazione
 
+Serve **Python 3.10 o successivo**. Gli script creano un ambiente virtuale
+dentro la cartella del progetto: non toccano il Python di sistema, e si
+disinstallano cancellando `.venv`, `bin` e `vendor`.
+
+### Windows
+
+```powershell
+git clone <questo-repo> apisec-suite
+cd apisec-suite
+.\install.ps1
+```
+
+Se PowerShell rifiuta di eseguire lo script, la policy di esecuzione e'
+ristretta. Per la sola sessione corrente:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+### Linux e macOS
+
 ```bash
 git clone <questo-repo> apisec-suite
 cd apisec-suite
-pip install -r requirements.txt
-python bootstrap.py --all      # scarica VulnAPI, clona APISCAN
-python bootstrap.py --check    # verifica cosa manca
+./install.sh
 ```
+
+Il bit di esecuzione e' registrato nel repository, quindi `chmod` non serve. Se
+hai copiato i file senza git (zip, chiavetta, condivisione di rete) il
+permesso puo' essersi perso: `chmod +x install.sh run-*.sh run-gui.command`.
+
+Tkinter non si installa da pip — e' un binding a Tcl/Tk di sistema. Se manca,
+l'installer lo rileva e dice cosa fare:
+
+| Sistema | Comando |
+|---|---|
+| macOS (Homebrew) | `brew install python-tk` |
+| macOS (python.org) | gia' incluso |
+| Debian / Ubuntu | `sudo apt install python3-tk` |
+| Fedora | `sudo dnf install python3-tkinter` |
+| Arch | `sudo pacman -S tk` |
+
+Senza Tkinter la GUI non parte, ma la riga di comando funziona lo stesso.
+
+### Opzioni dell'installer
+
+| Opzione | Effetto |
+|---|---|
+| `--force` / `-Force` | ricrea il venv da zero |
+| `--skip-engines` / `-SkipEngines` | non scarica VulnAPI ne' clona APISCAN |
+| `--python` / `-Python` | usa un interprete specifico |
 
 Gli engine non sono ridistribuiti qui: `bootstrap.py` li prende dalle fonti
 ufficiali. E' igiene sulle licenze e sugli aggiornamenti.
 
 ## Uso
 
+| | Windows | Linux / macOS |
+|---|---|---|
+| Interfaccia grafica | `.\run-gui.ps1` | `./run-gui.sh` |
+| Scansione | `.\run-scan.ps1 ...` | `./run-scan.sh ...` |
+| Target di test | `.\run-testtarget.ps1` | `./run-testtarget.sh` |
+| Verifica installazione | `.\install.ps1` | `./install.sh` |
+
+Su **macOS** c'e' anche `run-gui.command`: doppio click dal Finder, senza
+passare dal Terminale. Al primo avvio macOS puo' chiedere conferma se il file
+risulta scaricato da internet.
+
+Gli script trovano il venv da soli: non serve attivarlo a mano.
+
 ### Interfaccia grafica
 
 ```bash
-python apisec_gui.py
+./run-gui.sh          # oppure  .\run-gui.ps1  su Windows
+python apisec_gui.py  # se preferisci gestire l'ambiente da te
 ```
+
+Non e' un'applicazione web: si apre una finestra, non c'e' nessun indirizzo a
+cui collegarsi.
 
 E' la GUI di APISCAN **estesa**, non riscritta. I tab `Target`,
 `Authentication`, `Form Login`, `OWASP Scans` e `Advanced` sono quelli
@@ -71,18 +132,23 @@ mTLS, form-login con auto-detect — alimenta **tutti** gli engine.
 
 ```bash
 # scansione base
-python apisec_cli.py --url https://api.example.test --openapi openapi.json
+./run-scan.sh --url https://api.example.test --openapi openapi.json
 
 # con autenticazione e soglia di fallimento
-python apisec_cli.py --url https://api.example.test --openapi openapi.json \
+./run-scan.sh --url https://api.example.test --openapi openapi.json \
     --flow token --token "$API_TOKEN" --fail-on high --sarif out.sarif
 
 # solo un engine, con analisi LLM
-python apisec_cli.py --url ... --engines vulnapi --llm
+./run-scan.sh --url ... --engines vulnapi --llm
 
 # quali provider LLM sono disponibili?
-python apisec_cli.py --llm-list
+./run-scan.sh --llm-list
 ```
+
+Su Windows lo stesso con `.\run-scan.ps1`. Le liste accettano sia la virgola
+sia lo spazio (`--engines vulnapi,apiscan` oppure `--engines "vulnapi apiscan"`),
+perche' in PowerShell la virgola costruisce un array e altrimenti la lista
+arriverebbe deformata.
 
 Codici di uscita: `0` pulito · `1` finding sopra soglia · `2` configurazione
 non valida · `3` nessun engine ha potuto girare.
@@ -126,7 +192,8 @@ una vulnerabilita' vera che sparisce prima di essere letta.
 ## Target di test
 
 ```bash
-python tests/vulnerable_api.py      # http://127.0.0.1:8000
+./run-testtarget.sh          # http://127.0.0.1:8000
+./run-testtarget.sh --port 9000
 ```
 
 Un'API FastAPI deliberatamente insicura, con OpenAPI auto-generato e difetti
@@ -140,6 +207,11 @@ provarli su sistemi di terzi non e' accettabile. Bind su `127.0.0.1`.
 ## Architettura
 
 ```
+install.ps1  install.sh          creano il venv e scaricano gli engine
+run-gui.ps1  run-gui.sh  run-gui.command
+run-scan.ps1 run-scan.sh
+run-testtarget.ps1 run-testtarget.sh
+
 apisec/
 ├── config.py          ScanConfig, AuthConfig, LLMSettings — configurazione condivisa
 ├── findings.py        Finding unificato, severita', classi di difetto per la dedup

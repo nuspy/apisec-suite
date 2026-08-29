@@ -107,7 +107,9 @@ def check_python_deps(quiet: bool = False) -> bool:
 
 def check_llmswitch(quiet: bool = False) -> bool:
     sys.path.insert(0, str(ROOT))
-    from apisec.llm import available, list_providers, unavailable_reason
+    from apisec.llm import (
+        available, list_providers, list_registries, unavailable_reason,
+    )
 
     if not available():
         _say(f"[~] llmswitch non disponibile: {unavailable_reason()}", quiet)
@@ -115,12 +117,30 @@ def check_llmswitch(quiet: bool = False) -> bool:
              "comunque.", quiet)
         return False
 
-    providers = list_providers()
-    _say(f"[=] llmswitch disponibile — {len(providers)} provider configurati",
-         quiet)
-    for prov in providers[:12]:
-        where = "locale" if prov.local else "remoto"
-        _say(f"      {prov.pid or prov.type:14} {prov.label} ({where})", quiet)
+    # llmswitch tiene un registry per applicazione: guardare solo quello di
+    # default direbbe "0 provider" anche a chi ne ha gia' configurati per un
+    # altro progetto, che sono invece riutilizzabili da qui.
+    registries = list_registries()
+    if not registries:
+        _say("[~] llmswitch disponibile, ma nessun registry trovato.", quiet)
+        _say("    Configura un provider con llmswitch, poi selezionalo nel "
+             "tab LLM.", quiet)
+        return True
+
+    total = sum(count for _, count in registries)
+    _say(f"[=] llmswitch disponibile — {len(registries)} registry, "
+         f"{total} provider in tutto", quiet)
+    for name, count in registries:
+        marker = " " if count else "~"
+        _say(f"      [{marker}] {name:20} {count} provider", quiet)
+        if count:
+            for prov in list_providers(name)[:8]:
+                where = "locale" if prov.local else "remoto"
+                _say(f"            {prov.pid or prov.type:14} {prov.label} "
+                     f"({where})", quiet)
+    if total == 0:
+        _say("    Nessun provider configurato: l'analisi LLM restera' "
+             "disattivata.", quiet)
     return True
 
 

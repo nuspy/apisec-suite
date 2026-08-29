@@ -137,6 +137,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def split_list(value: str) -> list[str]:
+    """Divide una lista di opzioni su virgole *o* spazi.
+
+    Accettare entrambi non e' tolleranza gratuita: in PowerShell la virgola e'
+    l'operatore di costruzione array, quindi `--engines vulnapi,apiscan`
+    raggiunge lo script come due elementi che vengono poi ricomposti con uno
+    spazio. Riconoscendo solo la virgola, la lista risulterebbe un unico nome
+    inesistente e la scansione partirebbe con zero engine senza segnalare
+    nulla — un fallimento silenzioso che costa piu' di questa riga.
+    """
+    return [item for chunk in str(value or "").split(",")
+            for item in chunk.split() if item]
+
+
 def config_from_args(args: argparse.Namespace) -> ScanConfig:
     headers: dict[str, str] = {}
     for raw in args.header:
@@ -181,7 +195,7 @@ def config_from_args(args: argparse.Namespace) -> ScanConfig:
         target_url=args.url,
         openapi=args.openapi,
         output_dir=Path(args.output),
-        engines=[e.strip() for e in args.engines.split(",") if e.strip()],
+        engines=split_list(args.engines),
         auth=auth,
         llm=llm,
         threads=args.threads,
@@ -190,11 +204,10 @@ def config_from_args(args: argparse.Namespace) -> ScanConfig:
         insecure=args.insecure,
         debug=args.debug,
         crawl=args.crawl,
-        apiscan_checks=[c.strip() for c in args.checks.split(",") if c.strip()],
+        apiscan_checks=split_list(args.checks),
         vulnapi_mode=args.vulnapi_mode,
-        vulnapi_scans=[s.strip() for s in args.scans.split(",") if s.strip()],
-        vulnapi_exclude=[s.strip() for s in args.exclude_scans.split(",")
-                         if s.strip()],
+        vulnapi_scans=split_list(args.scans),
+        vulnapi_exclude=split_list(args.exclude_scans),
     )
 
 
@@ -253,6 +266,15 @@ def main(argv: list[str] | None = None) -> int:
         cfg.require_valid()
     except ConfigError as exc:
         print(f"[!] Configurazione non valida: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+
+    # Un nome di engine sbagliato verrebbe ignorato dal registro e la scansione
+    # girerebbe a vuoto: meglio dirlo subito e per nome.
+    from apisec.engines import ENGINE_ORDER
+    unknown = [name for name in cfg.engines if name not in ENGINE_ORDER]
+    if unknown:
+        print(f"[!] Engine sconosciuti: {', '.join(unknown)}. "
+              f"Disponibili: {', '.join(ENGINE_ORDER)}", file=sys.stderr)
         return EXIT_CONFIG
 
     def progress(line: str) -> None:

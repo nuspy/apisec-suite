@@ -1,0 +1,33 @@
+# Gli script di shell DEVONO avere fine riga LF.
+#
+# Con CRLF, su Linux e macOS lo shebang diventa "/usr/bin/env bash\r" e
+# l'esecuzione fallisce con un messaggio poco comprensibile:
+#
+#     ./install.sh: /usr/bin/env: bad interpreter: No such file or directory
+#
+# Il progetto si scrive anche da Windows, dove core.autocrlf tenderebbe a
+# convertirli: queste regole lo impediscono.
+*.sh        text eol=lf
+*.command   text eol=lf
+
+# PowerShell resta CRLF: e' la convenzione su Windows e alcuni editor legacy
+# non gestiscono bene LF nei .ps1.
+*.ps1       text eol=crlf
+
+# I workflow di CI girano su runner Linux.
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# Il resto: normalizzato nel repository, nativo nella copia di lavoro.
+*.py        text
+*.md        text
+*.txt       text
+*.json      text
+
+# Binari: nessuna conversione.
+*.png       binary
+*.jpg       binary
+*.gif       binary
+*.zip       binary
+*.exe       binary
+*.db        binary
