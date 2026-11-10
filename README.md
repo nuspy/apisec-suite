@@ -49,7 +49,7 @@ disinstallano cancellando `.venv`, `bin` e `vendor`.
 ### Windows
 
 ```powershell
-git clone <questo-repo> apisec-suite
+git clone https://github.com/nuspy/apisec-suite.git apisec-suite
 cd apisec-suite
 .\install.ps1
 ```
@@ -64,7 +64,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ### Linux e macOS
 
 ```bash
-git clone <questo-repo> apisec-suite
+git clone https://github.com/nuspy/apisec-suite.git apisec-suite
 cd apisec-suite
 ./install.sh
 ```
